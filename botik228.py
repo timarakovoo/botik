@@ -1,52 +1,50 @@
-import telebot
+import osAdd commentMore actions
 import random
-import pickle
-import os
+import json
 import requests
 from io import BytesIO
+from flask import Flask, request
+import telebot
+from telebot.types import Update
 
-TOKEN = '7798488343:AAHUeygP3dJLCy4ynNajG4tFfGurFhYDVPE'  # 🔁 Замени на свой токен
-bot = telebot.TeleBot(TOKEN)
+BOT_TOKEN = os.getenv("7798488343:AAHUeygP3dJLCy4ynNajG4tFfGurFhYDVPE")
+WEBHOOK_URL = os.getenv("https://dashboard.render.com/project/prj-d17ke3ndiees7387kff0")
 
-DATA_FILE = "collections.pkl"
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
-# 📂 Загрузка сохранённых коллекций
+DATA_FILE = "data.json"
+user_collections = {}
+
+# Загрузка данных
 if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "rb") as f:
-        user_collections = pickle.load(f)
-else:
-    user_collections = {}
+    with open(DATA_FILE, "r") as f:
+        user_collections = json.load(f)
 
-
+# Сохранение данных
 def save_data():
-    with open(DATA_FILE, "wb") as f:
-        pickle.dump(user_collections, f)
-
+    with open(DATA_FILE, "w") as f:
+        json.dump(user_collections, f)
 
 def rarity_stars(rarity):
     return "⭐" * rarity
 
-
-# 🎲 Генерация нового котёнка
 def generate_kitten():
     kitten_id = random.randint(100000, 999999)
-
-    # Стабильный источник изображений
     image_url = f"https://cataas.com/cat?width=300&height=300&uniq={kitten_id}"
-
-    # Шанс: 70% обычный, 25% редкий, 5% легендарный
     roll = random.randint(1, 100)
-    if roll <= 5:
-        rarity = 5
-    elif roll <= 30:
-        rarity = 4
-    else:
-        rarity = 3
-
+    rarity = 5 if roll <= 5 else 4 if roll <= 30 else 3
     return {"id": kitten_id, "url": image_url, "rarity": rarity}
 
+def is_subscribed(user_id):
+    try:
+        member = bot.get_chat_member("@freekittens", user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        print(f"[Ошибка проверки подписки]: {e}")
+        return False
 
-@bot.message_handler(commands=['спат'])
+@bot.message_handler(commands=['start', 'help'])
 def start(message):
     welcome = (
         "👋 Привет! Я — казик котят, твой личный коллекционер вспатышей!\n\n"
@@ -54,109 +52,104 @@ def start(message):
         "🐱 /cat — получить случайного мягкого и всратого\n"
         "📖 /collection — посмотреть свою коллекцию\n"
         "🏆 /top — топ коллекционеров\n"
-        "🏆 подпишись на @freekittens \n"
         "ℹ️ /help — список команд"
     )
     bot.send_message(message.chat.id, welcome)
 
-
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    start(message)
-
-@bot.message_handler(commands=['broadcast'])
-def broadcast_command(message):
-    if message.from_user.username != "saygexteam":
-        bot.reply_to(message, "⛔ У тебя нет прав использовать эту команду.")
-        return
-
-    msg = bot.reply_to(message, "✏️ Введи сообщение для рассылки всем пользователям:")
-    bot.register_next_step_handler(msg, send_broadcast)
-
-
-def send_broadcast(message):
-    if message.from_user.username != "saygexteam":
-        return
-
-    broadcast_text = message.text
-    count = 0
-    failed = 0
-
-    for user_id in user_collections:
-        try:
-            bot.send_message(user_id, f"📢 Сообщение от администратора:\n\n{broadcast_text}")
-            count += 1
-        except Exception as e:
-            failed += 1
-            print(f"[Не удалось отправить {user_id}]: {e}")
-
-    bot.send_message(message.chat.id, f"✅ Сообщение отправлено {count} пользователям.\n❌ Ошибок: {failed}.")
-
-
-
 @bot.message_handler(commands=['cat'])
 def send_cat(message):
     user_id = message.from_user.id
+    if not is_subscribed(user_id):
+        bot.send_message(message.chat.id, "📛 Подпишись на @freekittens, чтобы получать котят!")
+        return
+
     kitten = generate_kitten()
+    user_collections.setdefault(str(user_id), [])
 
-    if user_id not in user_collections:
-        user_collections[user_id] = []
-
-    already_has = kitten["id"] in user_collections[user_id]
+    already_has = kitten["id"] in user_collections[str(user_id)]
     if not already_has:
-        user_collections[user_id].append(kitten["id"])
+        user_collections[str(user_id)].append(kitten["id"])
         save_data()
 
     caption = f"{rarity_stars(kitten['rarity'])} Котёнок №{kitten['id']}\n"
     caption += "Ты уже видел его!" if already_has else "Добавлен в твою коллекцию!"
 
-    # Скачиваем изображение и отправляем как файл
     try:
         response = requests.get(kitten["url"])
         response.raise_for_status()
         photo = BytesIO(response.content)
-        photo.name = 'kitten.jpg'
-        bot.send_photo(message.chat.id, photo=photo, caption=caption)
+        photo.name = "kitten.jpg"
+        bot.send_photo(message.chat.id, photo, caption=caption)
     except Exception as e:
-        bot.send_message(message.chat.id, "😿 Не удалось загрузить котёнка. Попробуй ещё раз.")
         print("Ошибка загрузки:", e)
-
+        bot.send_message(message.chat.id, "😿 Не удалось загрузить котёнка. Попробуй позже.")
 
 @bot.message_handler(commands=['collection'])
 def collection(message):
     user_id = message.from_user.id
-    collection = user_collections.get(user_id, [])
-
-    if not collection:
-        bot.reply_to(message, "У тебя пока нет котят 😿 Напиши /cat, чтобы начать собирать!")
+    if not is_subscribed(user_id):
+        bot.send_message(message.chat.id, "📛 Подпишись на @freekittens, чтобы смотреть коллекцию!")
         return
 
-    response = f"🐾 У тебя {len(collection)} котят!\n"
-    response += "Каждый с уникальным номером и редкостью."
-    bot.reply_to(message, response)
+    collection = user_collections.get(str(user_id), [])
+    if not collection:
+        bot.send_message(message.chat.id, "У тебя пока нет котят 😿 Напиши /cat, чтобы начать!")
+        return
 
+    response = f"🐾 У тебя {len(collection)} котят!\nКаждый с уникальным номером и редкостью."
+    bot.send_message(message.chat.id, response)
 
 @bot.message_handler(commands=['top'])
 def top(message):
     if not user_collections:
-        bot.reply_to(message, "Топ пока пуст 🫥")
+        bot.send_message(message.chat.id, "Топ пока пуст 🫥")
         return
 
-    top_list = sorted(user_collections.items(), key=lambda x: len(x[1]), reverse=True)
-    text = ("🏆 Топ коллекционеров котят:\n"
-            "😿 ( подпишись на @freekittens )😿\n"
-            )
-    for i, (uid, kittens_list) in enumerate(top_list[:5], start=1):
+    sorted_top = sorted(user_collections.items(), key=lambda x: len(x[1]), reverse=True)
+    text = "🏆 Топ коллекционеров:\n"
+    for i, (uid, kittens) in enumerate(sorted_top[:5], start=1):
         try:
-            user = bot.get_chat(uid)
-            username = user.first_name or f"User {uid}"
+            user = bot.get_chat(int(uid))
+            name = user.first_name or f"User {uid}"
         except:
-            username = f"User {uid}"
-        text += f"{i}. {username} — {len(kittens_list)} котят\n"
+            name = f"User {uid}"
+        text += f"{i}. {name} — {len(kittens)} котят\n"
 
-    bot.reply_to(message, text)
+    bot.send_message(message.chat.id, text)
 
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.username != "saygexteam":
+        bot.reply_to(message, "⛔ У тебя нет прав.")
+        return
+    msg = bot.reply_to(message, "✏️ Введи сообщение для рассылки:")
+    bot.register_next_step_handler(msg, send_broadcast)
 
-# 🚀 Запуск бота
-print("Бот запущен.")
-bot.polling()
+def send_broadcast(message):
+    if message.from_user.username != "saygexteam":
+        return
+    count = 0
+    for uid in user_collections:
+        try:
+            bot.send_message(int(uid), f"📢 Сообщение от админа:\n{message.text}")
+            count += 1
+        except:
+            continue
+    bot.send_message(message.chat.id, f"✅ Отправлено {count} пользователям.")
+
+# 🌐 Webhook обработка
+@app.route('/', methods=['GET'])
+def index():
+    return "бот жив!"
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.stream.read().decode("utf-8"))
+    bot.process_new_updates([update])
+    return "ok", 200
+
+# 🎯 Установка вебхука
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
